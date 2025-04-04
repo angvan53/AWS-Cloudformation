@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  This CFN template create ASG and ALB with ASG Target Tracking Policy via CloudFormation template.
+
+Parameters:
+  myVPC:
+    Description: Select your VPC.
+    Type: AWS::EC2::VPC::Id
+
+  myKeyPair:
+    Description: Select your KeyName.
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: first.key
+
+  myInstanceType:
+    Description: Enter t2.micro, t3.micro, or t2.nano. Select your InstanceType.
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t2.nano
+
+  myEnv:
+    Description: Select your Environment.
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - test
+
+  mySubnets:
+    Description: Select at least two subnets from different AZ
+    Type: List<AWS::EC2::Subnet::Id>
+
+Mappings:
+  myRegionImageMap:
+    us-east-1:
+      prod: ami-00a929b66ed6e0de6
+      test: ami-08c60224b47a6fc12
+    us-east-2:
+      prod: ami-00db8dadb36c9815e
+      test: ami-09b90e09742640522
+    us-west-1:
+      prod: ami-03ed1381c73a5660e
+      test: ami-0827b6c5b977c020e
+
+Resources:
+  myASGPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref myASG # Required
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60.0
+
+  myASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: angvan-cfn-asg-11
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 200
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !GetAtt myLT.LaunchTemplateId
+        Version: !GetAtt myLT.DefaultVersionNumber
+      MaxSize: 4 # Required
+      MinSize: 1 # Required
+      TargetGroupARNs:
+        - !GetAtt myTargetGrp.TargetGroupArn #!Ref myTargetGrp
+      VPCZoneIdentifier: !Ref mySubnets
+
+  myListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: # Required
+        - TargetGroupArn: !GetAtt myTargetGrp.TargetGroupArn # !Ref myTargetGrp
+          Type: forward
+      LoadBalancerArn: !GetAtt myALB.LoadBalancerArn # !Ref myALB  #  Required
+      Port: 80
+      Protocol: HTTP
+
+  myALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: angvan-cfn-lb-11
+      SecurityGroups:
+        - !Ref mySecGrp
+      Subnets: !Ref mySubnets
+      Type: application
+
+  myLT:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !FindInMap
+          - myRegionImageMap
+          - !Ref "AWS::Region"
+          - !Ref myEnv
+        InstanceType: !Ref myInstanceType
+        KeyName: !Ref myKeyPair #paulosx
+        SecurityGroupIds:
+          - !Ref mySecGrp #!GetAtt mySecGrp.GroupId
+        UserData: !Base64 |
+          #!/bin/bash
+          #update os
+          dnf update -y
+          #install apache server
+          dnf install -y httpd
+          # get private ip address of ec2 instance using instance metadata
+          TOKEN=`curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"` \
+          && PRIVATE_IP=`curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4`
+          # get public ip address of ec2 instance using instance metadata
+          TOKEN=`curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"` \
+          && PUBLIC_IP=`curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4` 
+          # get date and time of server
+          DATE_TIME=`date`
+          # Assign your name to the YOUR_NAME variable
+          YOUR_NAME="angvan"
+          # set all permissions
+          chmod -R 777 /var/www/html
+          # create a custom index.html file
+          echo "<html>
+          <head>
+              <title> Application Load Balancer</title>
+          </head>
+          <body>
+              <h1>Testing Application Load Balancer</h1>
+              <h2>Congratulations! You have created an instance from Launch Template</h2>
+              <h3>This web server is launched from launch template by $YOUR_NAME via CFN</h3>
+              <p>This instance is created at <b>$DATE_TIME</b></p>
+              <p>Private IP address of this instance is <b>$PRIVATE_IP</b></p>
+              <p>Public IP address of this instance is <b>$PUBLIC_IP</b></p>
+          </body>
+          </html>" > /var/www/html/index.html
+          # start apache server
+          systemctl start httpd
+          systemctl enable httpd
+      LaunchTemplateName: angvan-cfn-lt-11
+
+  myTargetGrp:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      Name: angvan-cfn-tg-11
+      Port: 80
+      Protocol: HTTP
+      Tags:
+        - Key: Name
+          Value: angvan-cfn-tg-11
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref myVPC
+
+  mySecGrp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP # Required
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Enable HTTP port
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: Enable SSH port
+      Tags:
+        - Key: Name
+          Value: angvan-cfn-secgrp-11
+      VpcId: !Ref myVPC
+
+Outputs:
+  ShowALBDNS:
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt myALB.DNSName
+    Description: DNS of ALB
